@@ -238,7 +238,6 @@ union_seq: simple_type BAR simple_type { result = [val[0], val[2]] }
          | simple_type BAR union_seq { result = [val[0]] + val[2] }
 
 keyword: LIDENT
-       | MODULE_NAME
        | INTERFACE_NAME
        | ANY
        | CLASS
@@ -272,7 +271,7 @@ const_decl: module_name COLON type {
               loc = val.first.location + val.last.location
               result = AST::Signature::Const.new(
                 location: loc,
-                name: val[0].value,
+                name: val[0].value.absolute!,
                 type: val[2]
               )
             }
@@ -325,20 +324,29 @@ self_type_opt: { result = nil }
 
 interface_name: INTERFACE_NAME
 
-module_name: module_name0
-           | COLON2 module_name0 {
-               loc = val.first.location + val.last.location
-               result = LocatedValue.new(location: loc, value: val[1].value.absolute!)
+module_name: namespace {
+               namespace = val[0].value
+               component = namespace.path.last
+               name = ModuleName.new(namespace: namespace.parent, name: component)
+               result = LocatedValue.new(location: val[0].location, value: name)
              }
 
-module_name0: UIDENT {
-                result = LocatedValue.new(location: val[0].location, value: ModuleName.parse(val[0].value))
-              }
-           | UIDENT COLON2 module_name0 {
-               location = val[0].location + val.last.location
-               name = ModuleName.parse(val[0].value) + val.last.value
-               result = LocatedValue.new(location: location, value: name)
-             }
+namespace: namespace0 {
+             namespace = AST::Namespace.new(path: val[0].value, absolute: false)
+             result = LocatedValue.new(location: val[0].location, value: namespace)
+           }
+         | COLON2 namespace0 {
+             namespace = AST::Namespace.new(path: val[1].value, absolute: true)
+             location = val[0].location + val[1].location
+             result = LocatedValue.new(location: location, value: namespace)
+           }
+
+namespace0: UIDENT { result = LocatedValue.new(location: val[0].location, value: [val[0].value]) }
+          | UIDENT COLON2 namespace0 {
+              array = [val[0].value] + val[2].value
+              location = val[0].location + val[2].location
+              result = LocatedValue.new(location: location, value: array)
+            }
 
 class_members: { result = [] }
              | class_member class_members { result = [val[0]] + val[1] }
@@ -392,22 +400,22 @@ module_instance_method_member: DEF method_annotations SELFQ DOT method_name COLO
                                  )
                                }
 include_member: INCLUDE module_name {
-                  loc = val.first.location + val.last.location
+                  loc = val[0].location + val[1].location
                   name = val[1].value
                   result = AST::Signature::Members::Include.new(name: name, location: loc, args: [])
                 }
               | INCLUDE module_name LT type_seq GT {
-                  loc = val.first.location + val.last.location
+                  loc = val[0].location + val[4].location
                   name = val[1].value
                   result = AST::Signature::Members::Include.new(name: name, location: loc, args: val[3])
                 }
 extend_member: EXTEND module_name {
-                 loc = val.first.location + val.last.location
+                 loc = val[0].location + val[1].location
                  name = val[1].value
                  result = AST::Signature::Members::Extend.new(name: name, location: loc, args: [])
                }
              | EXTEND module_name LT type_seq GT {
-                 loc = val.first.location + val.last.location
+                 loc = val[0].location + val[4].location
                  name = val[1].value
                  result = AST::Signature::Members::Extend.new(name: name, location: loc, args: val[3])
                }
@@ -498,7 +506,6 @@ method_name: method_name0
 
 method_name0: LIDENT
             | UIDENT
-            | MODULE_NAME
             | INTERFACE_NAME
             | ANY | VOID
             | INTERFACE
@@ -548,7 +555,7 @@ annotation: AT_TYPE VAR subject COLON type {
               result = AST::Annotation::SelfType.new(type: val[3], location: loc)
             }
           | AT_TYPE CONST module_name COLON type {
-              loc = val.first.location + val.last.location
+              loc = val[0].location + val[4].location
               result = AST::Annotation::ConstType.new(name: val[2].value,
                                                       type: val[4],
                                                       location: loc)
