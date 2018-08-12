@@ -508,7 +508,7 @@ end
     builder = Builder.new(signatures: signatures)
 
     assert_raises Builder::RecursiveDefinitionError do
-      builder.build(TypeName::Instance.new(name: ModuleName.parse(:A)))
+      builder.build_instance(ModuleName.parse(:A), current: Namespace.root, with_initialize: false)
     end
   end
 

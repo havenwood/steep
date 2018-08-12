@@ -622,26 +622,52 @@ module Steep
           when TypeName::Alias
             resolve(expand_alias(type), self_type: self_type, instance_type: instance_type, module_type: module_type, with_initialize: with_initialize)
           else
-            builder.build(type.name, with_initialize: with_initialize).yield_self do |abstract|
+            abstract, instance_type_, module_type_ =
               case type.name
-              when TypeName::Instance, TypeName::Interface
-                abstract.instantiate(
-                  type: self_type,
-                  args: type.args,
-                  instance_type: type,
-                  module_type: module_type || module_type(type)
-                )
-              when TypeName::Class, TypeName::Module
-                signature = builder.signatures.find_class_or_module(type.name.name)
-                args = signature.params&.variables&.map {|var| AST::Types::Var.new(name: var) } || []
-                abstract.instantiate(
-                  type: self_type,
-                  args: [],
-                  instance_type: AST::Types::Name.new(name: TypeName::Instance.new(name: type.name.name), args: args),
-                  module_type: module_type || type
-                )
-              end
+              when TypeName::Interface
+                [
+                  builder.build_interface(type.name.name, current: AST::Namespace.root),
+                  AST::Types::Name.new(name: type.name,
+                                       args: type.args,
+                                       location: nil),
+                  nil
+                ]
+              when TypeName::Instance
+                [
+                  builder.build_instance(type.name.name, with_initialize: with_initialize, current: AST::Namespace.root),
+                  type,
+                  AST::Types::Name.new(name: TypeName::Class.new(name: type.name.name, constructor: false),
+                                       args: [],
+                                       location: nil),
+                ]
+              when TypeName::Module
+                builder.build_module(type.name.name, current: AST::Namespace.root).yield_self do |interface|
+                  [
+                    interface,
+                    AST::Types::Name.new(name: TypeName::Instance.new(name: type.name.name),
+                                         args: interface.params,
+                                         location: nil),
+                    type
+                  ]
+                end
+              when TypeName::Class
+                builder.build_class(type.name.name, constructor: type.name.constructor, current: AST::Namespace.root).yield_self do |interface|
+                  [
+                    interface,
+                    AST::Types::Name.new(name: TypeName::Instance.new(name: type.name.name),
+                                         args: interface.params,
+                                         location: nil),
+                    type
+                  ]
+                end
             end
+
+            abstract.instantiate(
+              type: self_type,
+              args: type.args,
+              instance_type: instance_type || instance_type_,
+              module_type: module_type || module_type_
+            )
           end
         when AST::Types::Union
           interfaces = type.types.map do |member_type|

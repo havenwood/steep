@@ -15,11 +15,17 @@ module Steep
       end
 
       attr_reader :signatures
-      attr_reader :cache
+      attr_reader :class_cache
+      attr_reader :module_cache
+      attr_reader :instance_cache
+      attr_reader :interface_cache
 
       def initialize(signatures:)
-        @cache = {}
         @signatures = signatures
+        @class_cache = {}
+        @module_cache = {}
+        @instance_cache = {}
+        @interface_cache = {}
       end
 
       def absolute_type_name(type_name, current:)
@@ -80,48 +86,55 @@ module Steep
         end
       end
 
-      def build(type_name, current: AST::Namespace.root, with_initialize: false)
-        type_name = absolute_type_name(type_name, current: current)
-        cache_key = [type_name, with_initialize]
-        cached = cache[cache_key]
+      def cache_interface(cache, key:, &block)
+        cached = cache[key]
 
         case cached
         when nil
-          begin
-            cache[cache_key] = type_name
-
-            interface = case type_name
-                        when TypeName::Instance
-                          instance_to_interface(signatures.find_class_or_module(type_name.name), with_initialize: with_initialize)
-                        when TypeName::Module
-                          module_to_interface(signatures.find_module(type_name.name))
-                        when TypeName::Class
-                          class_to_interface(signatures.find_class_or_module(type_name.name),
-                                             constructor: type_name.constructor)
-                        when TypeName::Interface
-                          interface_to_interface(type_name.name,
-                                                 signatures.find_interface(type_name.name))
-                        else
-                          raise "Unexpected type_name: #{type_name.inspect}"
-                        end
-
-            cache[cache_key]= interface
-          rescue RecursiveDefinitionError => exn
-            exn.chain.unshift(type_name)
-            raise
-          end
-        when TypeName::Base
-          raise RecursiveDefinitionError, type_name
+          cache[key] = key
+          cache[key] = yield
+        when key
+          raise RecursiveDefinitionError, key
         else
           cached
         end
+      rescue RecursiveDefinitionError => exn
+        cache.delete key
+        raise exn
       end
 
-      def merge_mixin(type_name, args, methods:, ivars:, supers:, current:)
-        mixed = block_given? ? yield : build(type_name, current: current)
+      def build_class(module_name, current:, constructor:)
+        signature = signatures.find_class(module_name, current_module: current)
+        cache_interface(class_cache, key: [signature.name, !!constructor]) do
+          class_to_interface(signature, constructor: constructor)
+        end
+      end
 
-        supers.push(*mixed.supers)
-        instantiated = mixed.instantiate(
+      def build_module(module_name, current:)
+        signature = signatures.find_module(module_name, current_module: current)
+        cache_interface(module_cache, key: signature.name) do
+          module_to_interface(signature)
+        end
+      end
+
+      def build_instance(module_name, current:, with_initialize:)
+        signature = signatures.find_class_or_module(module_name, current_module: current)
+        cache_interface(instance_cache, key: [signature.name, with_initialize]) do
+          instance_to_interface(signature, with_initialize: with_initialize)
+        end
+      end
+
+      def build_interface(interface_name, current:)
+        signature = signatures.find_interface(interface_name)
+        cache_interface(interface_cache, key: [signature.name]) do
+          interface_to_interface(nil, signature)
+        end
+      end
+
+      def merge_mixin(interface, args, methods:, ivars:, supers:, current:)
+        supers.push(*interface.supers)
+
+        instantiated = interface.instantiate(
           type: AST::Types::Self.new,
           args: args,
           instance_type: AST::Types::Instance.new,
@@ -181,7 +194,7 @@ module Steep
           )
         }
 
-        klass = build(TypeName::Instance.new(name: AST::Builtin::Class.module_name))
+        klass = build_instance(AST::Builtin::Class.module_name, with_initialize: false, current: AST::Namespace.root)
         instantiated = klass.instantiate(
           type: AST::Types::Self.new,
           args: [],
@@ -192,30 +205,30 @@ module Steep
 
         unless module_name == AST::Builtin::BasicObject.module_name
           super_class_name = sig.super_class&.name&.yield_self {|name| absolute_type_name(name, current: namespace) } || AST::Builtin::Object.module_name
-          merge_mixin(TypeName::Class.new(name: super_class_name, constructor: constructor),
-                      [],
-                      methods: methods,
-                      ivars: {},
-                      supers: supers,
-                      current: namespace)
+          class_interface = build_class(super_class_name, current: AST::Namespace.root, constructor: constructor)
+          merge_mixin(class_interface, [], methods: methods, ivars: {}, supers: supers, current: namespace)
         end
 
         sig.members.each do |member|
           case member
           when AST::Signature::Members::Include
-            merge_mixin(TypeName::Module.new(name: member.name),
-                        [],
-                        methods: methods,
-                        supers: supers,
-                        ivars: {},
-                        current: namespace)
+            build_module(member.name, current: AST::Namespace.root).yield_self do |module_interface|
+              merge_mixin(module_interface,
+                          [],
+                          methods: methods,
+                          supers: supers,
+                          ivars: {},
+                          current: namespace)
+            end
           when AST::Signature::Members::Extend
-            merge_mixin(TypeName::Instance.new(name: member.name),
-                        member.args.map {|type| absolute_type(type, current: namespace) },
-                        methods: methods,
-                        ivars: {},
-                        supers: supers,
-                        current: namespace)
+            build_instance(member.name, current: AST::Namespace.root, with_initialize: false).yield_self do |module_interface|
+              merge_mixin(module_interface,
+                          member.args.map {|type| absolute_type(type, current: namespace) },
+                          methods: methods,
+                          ivars: {},
+                          supers: supers,
+                          current: namespace)
+            end
           end
         end
 
@@ -285,7 +298,7 @@ module Steep
         methods = {}
         ivar_chains = {}
 
-        module_instance = build(TypeName::Instance.new(name: AST::Builtin::Module.module_name))
+        module_instance = build_instance(AST::Builtin::Module.module_name, with_initialize: false, current: AST::Namespace.root)
         instantiated = module_instance.instantiate(
           type: AST::Types::Self.new,
           args: [],
@@ -297,19 +310,24 @@ module Steep
         sig.members.each do |member|
           case member
           when AST::Signature::Members::Include
-            merge_mixin(TypeName::Module.new(name: member.name),
-                        member.args.map {|type| absolute_type(type, current: namespace) },
-                        methods: methods,
-                        ivars: ivar_chains,
-                        supers: supers,
-                        current: namespace)
+            build_module(member.name, current: AST::Namespace.root).yield_self do |module_interface|
+              merge_mixin(module_interface,
+                          member.args.map {|type| absolute_type(type, current: namespace) },
+                          methods: methods,
+                          ivars: ivar_chains,
+                          supers: supers,
+                          current: namespace)
+            end
           when AST::Signature::Members::Extend
-            merge_mixin(TypeName::Instance.new(name: member.name),
-                        member.args.map {|type| absolute_type(type, current: namespace) },
-                        methods: methods,
-                        ivars: ivar_chains,
-                        supers: supers,
-                        current: namespace)
+            build_instance(member.name, current: AST::Namespace.root, with_initialize: false).yield_self do |module_interface|
+              merge_mixin(module_interface,
+                          member.args.map {|type| absolute_type(type, current: namespace) },
+                          methods: methods,
+                          ivars: ivar_chains,
+                          supers: supers,
+                          current: namespace)
+
+            end
           end
         end
 
@@ -360,9 +378,9 @@ module Steep
         if sig.is_a?(AST::Signature::Class)
           unless sig.name == AST::Builtin::BasicObject.module_name
             super_class_name = sig.super_class&.name || AST::Builtin::Object.module_name
-            super_class_interface = build(TypeName::Instance.new(name: super_class_name),
-                                          current: namespace,
-                                          with_initialize: with_initialize)
+            super_class_interface = build_instance(super_class_name,
+                                                   current: namespace,
+                                                   with_initialize: with_initialize)
 
             supers.push(*super_class_interface.supers)
             instantiated = super_class_interface.instantiate(
@@ -386,12 +404,14 @@ module Steep
         sig.members.each do |member|
           case member
           when AST::Signature::Members::Include
-            merge_mixin(TypeName::Instance.new(name: member.name),
-                        member.args.map {|type| absolute_type(type, current: namespace) },
-                        methods: methods,
-                        ivars: ivar_chains,
-                        supers: supers,
-                        current: namespace)
+            build_instance(member.name, current: AST::Namespace.root, with_initialize: false).yield_self do |module_interface|
+              merge_mixin(module_interface,
+                          member.args.map {|type| absolute_type(type, current: namespace) },
+                          methods: methods,
+                          ivars: ivar_chains,
+                          supers: supers,
+                          current: namespace)
+            end
           end
         end
 
