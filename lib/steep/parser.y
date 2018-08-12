@@ -185,11 +185,13 @@ application_type_name: module_name {
                                                    location: val[0].location)
                        }
                      | INTERFACE_NAME {
-                         result = LocatedValue.new(value: TypeName::Interface.new(name: val[0].value),
+                         interface_name = InterfaceName.new(name: val[0].value)
+                         result = LocatedValue.new(value: TypeName::Interface.new(name: interface_name),
                                                    location: val[0].location)
                        }
                      | LIDENT {
-                         result = LocatedValue.new(value: TypeName::Alias.new(name: val[0].value),
+                         alias_name = AliasName.new(name: val[0].value)
+                         result = LocatedValue.new(value: TypeName::Alias.new(name: alias_name),
                                                    location: val[0].location)
                        }
 
@@ -313,8 +315,9 @@ extension_decl: EXTENSION module_name type_params LPAREN UIDENT RPAREN class_mem
 
 alias_decl: TYPE LIDENT type_params EQ type {
               loc = val[0].location + val[4].location
+              name = AliasName.new(name: val[1].value)
               result = AST::Signature::Alias.new(location: loc,
-                                                 name: val[1].value,
+                                                 name: name,
                                                  params: val[2],
                                                  type: val[4])
             }
@@ -322,7 +325,10 @@ alias_decl: TYPE LIDENT type_params EQ type {
 self_type_opt: { result = nil }
              | COLON type { result = val[1] }
 
-interface_name: INTERFACE_NAME
+interface_name: INTERFACE_NAME {
+                  name = InterfaceName.new(name: val[0].value)
+                  result = LocatedValue.new(location: val[0].value, value: name)
+                }
 
 module_name: namespace {
                namespace = val[0].value
